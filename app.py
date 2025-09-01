@@ -476,7 +476,7 @@ class InstamartAutomation:
                     rows = self._process_extracted_data(extracted_data, file)
                     if rows:
                         # Save to Google Sheets
-                        self._save_to_sheets(config['spreadsheet_id'], sheet_name, rows)
+                        self._save_to_sheets(config['spreadsheet_id'], sheet_name, rows, file['id'], sheet_id=self._get_sheet_id(config['spreadsheet_id'], sheet_name))
                         processed_count += 1
                     
                     progress = 40 + (i + 1) / len(pdf_files) * 55
@@ -519,40 +519,49 @@ class InstamartAutomation:
             return b""
     
     def _process_extracted_data(self, extracted_data: Dict, file_info: Dict) -> List[Dict]:
-        """Process extracted data from LlamaParse using original logic"""
+        """Process extracted data from LlamaParse"""
         rows = []
         items = []
         
-        # Handle different data structures from the original scripts
         if "items" in extracted_data:
             items = extracted_data["items"]
-            for item in items:
-                item["po_number"] = self._get_value(extracted_data, ["po_number", "purchase_order_number", "PO No"])
-                item["vendor_invoice_number"] = self._get_value(extracted_data, ["vendor_invoice_number", "invoice_number", "inv_no", "Invoice No"])
-                item["supplier"] = self._get_value(extracted_data, ["supplier", "vendor", "Supplier Name"])
-                item["shipping_address"] = self._get_value(extracted_data, ["shipping_address", "receiver_address", "Shipping Address"])
-                item["grn_date"] = self._get_value(extracted_data, ["grn_date", "delivered_on", "GRN Date"])
-                item["source_file"] = file_info['name']
-                item["processed_date"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                item["drive_file_id"] = file_info['id']
         elif "product_items" in extracted_data:
             items = extracted_data["product_items"]
-            for item in items:
-                item["po_number"] = self._get_value(extracted_data, ["purchase_order_number", "po_number", "PO No"])
-                item["vendor_invoice_number"] = self._get_value(extracted_data, ["supplier_bill_number", "vendor_invoice_number", "invoice_number"])
-                item["supplier"] = self._get_value(extracted_data, ["supplier", "vendor", "Supplier Name"])
-                item["shipping_address"] = self._get_value(extracted_data, ["Shipping Address", "receiver_address", "shipping_address"])
-                item["grn_date"] = self._get_value(extracted_data, ["delivered_on", "grn_date"])
-                item["source_file"] = file_info['name']
-                item["processed_date"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                item["drive_file_id"] = file_info['id']
         else:
             return rows
         
-        # Clean items and add to rows
+        # Define top-level fields
+        row_base = {
+            "vendor_name": self._get_value(extracted_data, ["vendor_name", "supplier", "vendor", "Supplier Name"]),
+            "po_number": self._get_value(extracted_data, ["po_number", "purchase_order_number", "PO No"]),
+            "po_date": self._get_value(extracted_data, ["po_date", "purchase_order_date"]),
+            "grn_no": self._get_value(extracted_data, ["grn_no", "grn_number"]),
+            "grn_date": self._get_value(extracted_data, ["grn_date", "delivered_on", "GRN Date"]),
+            "invoice_no": self._get_value(extracted_data, ["invoice_no", "vendor_invoice_number", "invoice_number", "inv_no", "Invoice No"]),
+            "invoice_date": self._get_value(extracted_data, ["invoice_date", "invoice_dt"]),
+            "source_file": file_info['name'],
+            "processed_date": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "drive_file_id": file_info['id']
+        }
+        
         for item in items:
-            cleaned_item = {k: v for k, v in item.items() if v not in ["", None]}
-            rows.append(cleaned_item)
+            row = row_base.copy()
+            row.update({
+                "sku_code": self._get_value(item, ["sku_code", "sku"]),
+                "sku_description": self._get_value(item, ["sku_description", "description", "product_name"]),
+                "vendor_sku": self._get_value(item, ["vendor_sku", "vendor_sku_code"]),
+                "sku_bin": self._get_value(item, ["sku_bin", "bin_code"]),
+                "lot_no": self._get_value(item, ["lot_no", "lot_number"]),
+                "lot_mrp": self._get_value(item, ["lot_mrp", "mrp"]),
+                "exp_qty": self._get_value(item, ["exp_qty", "expected_quantity"]),
+                "recv_qty": self._get_value(item, ["recv_qty", "received_quantity"]),
+                "unit_price": self._get_value(item, ["unit_price", "price_per_unit"]),
+                "taxable_value": self._get_value(item, ["taxable_value", "taxable_amt"]),
+                "add_cess": self._get_value(item, ["add_cess", "additional_cess"]),
+                "total_inr": self._get_value(item, ["total_inr", "total_amount"])
+            })
+            cleaned_row = {k: v for k, v in row.items() if v not in ["", None]}
+            rows.append(cleaned_row)
         
         return rows
     
@@ -563,14 +572,11 @@ class InstamartAutomation:
                 return data[key]
         return default
     
-    def _save_to_sheets(self, spreadsheet_id: str, sheet_name: str, rows: List[Dict]):
+    def _save_to_sheets(self, spreadsheet_id: str, sheet_name: str, rows: List[Dict], file_id: str, sheet_id: int):
         """Save data to Google Sheets with proper header management and row replacement"""
         try:
             if not rows:
                 return
-            
-            # Get sheet ID for operations
-            sheet_id = self._get_sheet_id(spreadsheet_id, sheet_name)
             
             # Get existing headers and data
             existing_headers = self._get_sheet_headers(spreadsheet_id, sheet_name)
@@ -593,16 +599,11 @@ class InstamartAutomation:
                 all_headers = new_headers
                 self._update_headers(spreadsheet_id, sheet_name, all_headers)
             
-            # Get file ID to replace existing rows for this file
-            file_id = rows[0].get('drive_file_id', '') if rows else ''
+            # Prepare values
+            values = [[row.get(h, "") for h in all_headers] for row in rows]
             
-            if file_id:
-                # Replace rows for this specific file
-                self._replace_rows_for_file(spreadsheet_id, sheet_name, file_id, all_headers, rows, sheet_id)
-            else:
-                # Just append if no file ID
-                values = [[row.get(h, "") for h in all_headers] for row in rows]
-                self._append_to_google_sheet(spreadsheet_id, sheet_name, values)
+            # Replace rows for this specific file
+            self._replace_rows_for_file(spreadsheet_id, sheet_name, file_id, all_headers, values, sheet_id)
             
         except Exception as e:
             pass
@@ -658,14 +659,13 @@ class InstamartAutomation:
             return []
     
     def _replace_rows_for_file(self, spreadsheet_id: str, sheet_name: str, file_id: str, 
-                             headers: List[str], new_rows: List[Dict], sheet_id: int) -> bool:
+                             headers: List[str], new_rows: List[List[Any]], sheet_id: int) -> bool:
         """Delete existing rows for the file if any, and append new rows"""
         try:
             values = self._get_sheet_data(spreadsheet_id, sheet_name)
             if not values:
                 # No existing data, just append
-                values_to_append = [[row.get(h, "") for h in headers] for row in new_rows]
-                return self._append_to_google_sheet(spreadsheet_id, sheet_name, values_to_append)
+                return self._append_to_google_sheet(spreadsheet_id, sheet_name, new_rows)
             
             current_headers = values[0]
             data_rows = values[1:]
@@ -674,8 +674,7 @@ class InstamartAutomation:
             try:
                 file_id_col = current_headers.index('drive_file_id')
             except ValueError:
-                values_to_append = [[row.get(h, "") for h in headers] for row in new_rows]
-                return self._append_to_google_sheet(spreadsheet_id, sheet_name, values_to_append)
+                return self._append_to_google_sheet(spreadsheet_id, sheet_name, new_rows)
             
             # Find rows to delete (matching file_id)
             rows_to_delete = []
@@ -707,8 +706,7 @@ class InstamartAutomation:
                     ).execute()
             
             # Append new rows
-            values_to_append = [[row.get(h, "") for h in headers] for row in new_rows]
-            return self._append_to_google_sheet(spreadsheet_id, sheet_name, values_to_append)
+            return self._append_to_google_sheet(spreadsheet_id, sheet_name, new_rows)
             
         except Exception as e:
             return False
@@ -769,7 +767,7 @@ def main():
     if 'pdf_config' not in st.session_state:
         st.session_state.pdf_config = {
             'drive_folder_id': '19basSTaOUB-X0FlrwmBkeVULgE8nBQ5x',
-            'llama_api_key': 'llx-EBIuWAuvn8vnNzhCfaAGePeae1PnOwD4ftUPPACUx461YMid',
+            'llama_api_key': 'llx-8ohZG6LKpXdcd3o3QjvpgqyKMGLOStOAG71Mw0QSAgDsSALU',
             'llama_agent': 'Instamart Agent',
             'spreadsheet_id': '16WLcJKfkSLkTj1io962aSkgTGbk09PMdJTgkWNn11fw',
             'sheet_range': 'instamartgrn',
