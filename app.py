@@ -32,6 +32,9 @@ try:
 except ImportError:
     LLAMA_AVAILABLE = False
 
+# Import autorefresh for live updates
+from streamlit_autorefresh import st_autorefresh
+
 # Configure Streamlit page
 st.set_page_config(
     page_title="Instamart Automation",
@@ -39,20 +42,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-class StreamlitLogHandler(logging.Handler):
-    """Custom log handler for Streamlit"""
-    def __init__(self, log_container):
-        super().__init__()
-        self.log_container = log_container
-        self.logs = []
-    
-    def emit(self, record):
-        log_entry = self.format(record)
-        self.logs.append(log_entry)
-        # Update the container with latest logs
-        with self.log_container:
-            st.text_area("Real-time Logs", "\n".join(self.logs[-50:]), height=200, key=f"logs_{len(self.logs)}")
 
 class InstamartAutomation:
     def __init__(self):
@@ -167,7 +156,6 @@ class InstamartAutomation:
             query_parts.append(f"after:{start_date.strftime('%Y/%m/%d')}")
             
             query = " ".join(query_parts)
-            st.info(f"Searching Gmail with query: {query}")
             
             # Execute search
             result = self.gmail_service.users().messages().list(
@@ -175,28 +163,17 @@ class InstamartAutomation:
             ).execute()
             
             messages = result.get('messages', [])
-            st.info(f"Gmail search returned {len(messages)} messages")
-            
-            # Debug: Show some email details
-            if messages:
-                st.info("Sample emails found:")
-                for i, msg in enumerate(messages[:3]):  # Show first 3 emails
-                    try:
-                        email_details = self._get_email_details(msg['id'])
-                        st.write(f"  {i+1}. {email_details['subject']} from {email_details['sender']}")
-                    except:
-                        st.write(f"  {i+1}. Email ID: {msg['id']}")
             
             return messages
             
         except Exception as e:
-            st.error(f"Email search failed: {str(e)}")
             return []
     
-    def process_gmail_workflow(self, config: dict, progress_bar, status_text, log_container):
-        """Process Gmail attachment download workflow"""
+    def process_gmail_workflow(self, config: dict, progress_queue: queue.Queue):
+        """Process Gmail attachment download workflow, sending updates via queue"""
         try:
-            status_text.text("Starting Gmail workflow...")
+            progress_queue.put({'type': 'status', 'text': "Starting Gmail workflow..."})
+            progress_queue.put({'type': 'progress', 'value': 10})
             
             # Search for emails
             emails = self.search_emails(
@@ -206,38 +183,40 @@ class InstamartAutomation:
                 max_results=config['max_results']
             )
             
-            progress_bar.progress(25)
+            progress_queue.put({'type': 'progress', 'value': 25})
             
             if not emails:
-                st.warning("No emails found matching criteria")
-                return {'success': True, 'processed': 0}
+                progress_queue.put({'type': 'warning', 'text': "No emails found matching criteria"})
+                progress_queue.put({'type': 'done', 'result': {'success': True, 'processed': 0}})
+                return
             
-            status_text.text(f"Found {len(emails)} emails. Processing attachments...")
-            st.info(f"Found {len(emails)} emails matching criteria")
+            progress_queue.put({'type': 'status', 'text': f"Found {len(emails)} emails. Processing attachments..."})
+            progress_queue.put({'type': 'info', 'text': f"Found {len(emails)} emails matching criteria"})
             
             # Create base folder in Drive
             base_folder_name = "Gmail_Attachments"
             base_folder_id = self._create_drive_folder(base_folder_name, config.get('gdrive_folder_id'))
             
             if not base_folder_id:
-                st.error("Failed to create base folder in Google Drive")
-                return {'success': False, 'processed': 0}
+                progress_queue.put({'type': 'error', 'text': "Failed to create base folder in Google Drive"})
+                progress_queue.put({'type': 'done', 'result': {'success': False, 'processed': 0}})
+                return
             
-            progress_bar.progress(50)
+            progress_queue.put({'type': 'progress', 'value': 50})
             
             processed_count = 0
             total_attachments = 0
             
             for i, email in enumerate(emails):
                 try:
-                    status_text.text(f"Processing email {i+1}/{len(emails)}")
+                    progress_queue.put({'type': 'status', 'text': f"Processing email {i+1}/{len(emails)}"})
                     
                     # Get email details first
                     email_details = self._get_email_details(email['id'])
                     subject = email_details.get('subject', 'No Subject')[:50]
                     sender = email_details.get('sender', 'Unknown')
                     
-                    st.info(f"Processing email: {subject} from {sender}")
+                    progress_queue.put({'type': 'info', 'text': f"Processing email: {subject} from {sender}"})
                     
                     # Get full message with payload
                     message = self.gmail_service.users().messages().get(
@@ -245,7 +224,7 @@ class InstamartAutomation:
                     ).execute()
                     
                     if not message or not message.get('payload'):
-                        st.warning(f"No payload found for email: {subject}")
+                        progress_queue.put({'type': 'warning', 'text': f"No payload found for email: {subject}"})
                         continue
                     
                     # Extract attachments
@@ -256,24 +235,23 @@ class InstamartAutomation:
                     total_attachments += attachment_count
                     if attachment_count > 0:
                         processed_count += 1
-                        st.success(f"Found {attachment_count} attachments in: {subject}")
+                        progress_queue.put({'type': 'success', 'text': f"Found {attachment_count} attachments in: {subject}"})
                     else:
-                        st.info(f"No matching attachments in: {subject}")
+                        progress_queue.put({'type': 'info', 'text': f"No matching attachments in: {subject}"})
                     
                     progress = 50 + (i + 1) / len(emails) * 45
-                    progress_bar.progress(int(progress))
+                    progress_queue.put({'type': 'progress', 'value': int(progress)})
                     
                 except Exception as e:
-                    st.error(f"Failed to process email {email.get('id', 'unknown')}: {str(e)}")
+                    progress_queue.put({'type': 'error', 'text': f"Failed to process email {email.get('id', 'unknown')}: {str(e)}"})
             
-            progress_bar.progress(100)
-            status_text.text(f"Gmail workflow completed! Processed {total_attachments} attachments from {processed_count} emails")
-            
-            return {'success': True, 'processed': total_attachments}
+            progress_queue.put({'type': 'progress', 'value': 100})
+            progress_queue.put({'type': 'status', 'text': f"Gmail workflow completed! Processed {total_attachments} attachments from {processed_count} emails"})
+            progress_queue.put({'type': 'done', 'result': {'success': True, 'processed': total_attachments}})
             
         except Exception as e:
-            st.error(f"Gmail workflow failed: {str(e)}")
-            return {'success': False, 'processed': 0}
+            progress_queue.put({'type': 'error', 'text': f"Gmail workflow failed: {str(e)}"})
+            progress_queue.put({'type': 'done', 'result': {'success': False, 'processed': 0}})
     
     def _get_email_details(self, message_id: str) -> Dict:
         """Get email details including sender and subject"""
@@ -294,7 +272,6 @@ class InstamartAutomation:
             return details
             
         except Exception as e:
-            st.error(f"Failed to get email details for {message_id}: {str(e)}")
             return {'id': message_id, 'sender': 'Unknown', 'subject': 'Unknown', 'date': ''}
     
     def _create_drive_folder(self, folder_name: str, parent_folder_id: Optional[str] = None) -> str:
@@ -328,11 +305,9 @@ class InstamartAutomation:
             return folder.get('id')
             
         except Exception as e:
-            st.error(f"Failed to create folder {folder_name}: {str(e)}")
             return ""
     
     def _extract_attachments_from_email(self, message_id: str, payload: Dict, config: dict, base_folder_id: str) -> int:
-        """Extract attachments from email with proper folder structure"""
         processed_count = 0
         
         if "parts" in payload:
@@ -391,13 +366,12 @@ class InstamartAutomation:
                         fields='id'
                     ).execute()
                     
-                    st.info(f"Uploaded: {final_filename}")
                     processed_count = 1
                 else:
-                    st.info(f"File already exists, skipping: {final_filename}")
+                    pass
                 
             except Exception as e:
-                st.error(f"Failed to process attachment {filename}: {str(e)}")
+                pass
         
         return processed_count
     
@@ -443,14 +417,16 @@ class InstamartAutomation:
         except:
             return False
     
-    def process_pdf_workflow(self, config: dict, progress_bar, status_text, log_container):
-        """Process PDF workflow with LlamaParse"""
+    def process_pdf_workflow(self, config: dict, progress_queue: queue.Queue):
+        """Process PDF workflow with LlamaParse, sending updates via queue"""
         try:
             if not LLAMA_AVAILABLE:
-                st.error("LlamaParse not available. Install with: pip install llama-cloud-services")
-                return {'success': False, 'processed': 0}
+                progress_queue.put({'type': 'error', 'text': "LlamaParse not available. Install with: pip install llama-cloud-services"})
+                progress_queue.put({'type': 'done', 'result': {'success': False, 'processed': 0}})
+                return
             
-            status_text.text("Starting PDF processing workflow...")
+            progress_queue.put({'type': 'status', 'text': "Starting PDF processing workflow..."})
+            progress_queue.put({'type': 'progress', 'value': 20})
             
             # Setup LlamaParse
             os.environ["LLAMA_CLOUD_API_KEY"] = config['llama_api_key']
@@ -458,29 +434,29 @@ class InstamartAutomation:
             agent = extractor.get_agent(name=config['llama_agent'])
             
             if agent is None:
-                st.error(f"Could not find agent '{config['llama_agent']}'. Check LlamaParse dashboard.")
-                return {'success': False, 'processed': 0}
+                progress_queue.put({'type': 'error', 'text': f"Could not find agent '{config['llama_agent']}'. Check LlamaParse dashboard."})
+                progress_queue.put({'type': 'done', 'result': {'success': False, 'processed': 0}})
+                return
             
-            progress_bar.progress(20)
+            progress_queue.put({'type': 'progress', 'value': 40})
             
             # List PDF files from Drive
             pdf_files = self._list_drive_files(config['drive_folder_id'], config['days_back'])
             
             if not pdf_files:
-                st.warning("No PDF files found in the specified folder")
-                return {'success': True, 'processed': 0}
+                progress_queue.put({'type': 'warning', 'text': "No PDF files found in the specified folder"})
+                progress_queue.put({'type': 'done', 'result': {'success': True, 'processed': 0}})
+                return
             
-            progress_bar.progress(40)
-            status_text.text(f"Found {len(pdf_files)} PDF files. Processing...")
+            progress_queue.put({'type': 'status', 'text': f"Found {len(pdf_files)} PDF files. Processing..."})
             
             # Get sheet info
             sheet_name = config['sheet_range'].split('!')[0]
-            sheet_id = self._get_sheet_id(config['spreadsheet_id'], sheet_name)
             
             processed_count = 0
             for i, file in enumerate(pdf_files):
                 try:
-                    status_text.text(f"Processing PDF {i+1}/{len(pdf_files)}: {file['name']}")
+                    progress_queue.put({'type': 'status', 'text': f"Processing PDF {i+1}/{len(pdf_files)}: {file['name']}"})
                     
                     # Download PDF
                     pdf_data = self._download_from_drive(file['id'], file['name'])
@@ -500,23 +476,22 @@ class InstamartAutomation:
                     rows = self._process_extracted_data(extracted_data, file)
                     if rows:
                         # Save to Google Sheets
-                        self._save_to_sheets(config['spreadsheet_id'], sheet_name, rows, file['id'], sheet_id)
+                        self._save_to_sheets(config['spreadsheet_id'], sheet_name, rows)
                         processed_count += 1
                     
                     progress = 40 + (i + 1) / len(pdf_files) * 55
-                    progress_bar.progress(int(progress))
+                    progress_queue.put({'type': 'progress', 'value': int(progress)})
                     
                 except Exception as e:
-                    st.error(f"Failed to process PDF {file['name']}: {str(e)}")
+                    progress_queue.put({'type': 'error', 'text': f"Failed to process PDF {file['name']}: {str(e)}"})
             
-            progress_bar.progress(100)
-            status_text.text(f"PDF workflow completed! Processed {processed_count} PDFs")
-            
-            return {'success': True, 'processed': processed_count}
+            progress_queue.put({'type': 'progress', 'value': 100})
+            progress_queue.put({'type': 'status', 'text': f"PDF workflow completed! Processed {processed_count} PDFs"})
+            progress_queue.put({'type': 'done', 'result': {'success': True, 'processed': processed_count}})
             
         except Exception as e:
-            st.error(f"PDF workflow failed: {str(e)}")
-            return {'success': False, 'processed': 0}
+            progress_queue.put({'type': 'error', 'text': f"PDF workflow failed: {str(e)}"})
+            progress_queue.put({'type': 'done', 'result': {'success': False, 'processed': 0}})
     
     def _list_drive_files(self, folder_id: str, days_back: int) -> List[Dict]:
         """List PDF files in Drive folder"""
@@ -533,7 +508,6 @@ class InstamartAutomation:
             
             return results.get('files', [])
         except Exception as e:
-            st.error(f"Failed to list files: {str(e)}")
             return []
     
     def _download_from_drive(self, file_id: str, file_name: str) -> bytes:
@@ -542,54 +516,43 @@ class InstamartAutomation:
             request = self.drive_service.files().get_media(fileId=file_id)
             return request.execute()
         except Exception as e:
-            st.error(f"Failed to download {file_name}: {str(e)}")
             return b""
     
     def _process_extracted_data(self, extracted_data: Dict, file_info: Dict) -> List[Dict]:
-        """Process extracted data from LlamaParse"""
+        """Process extracted data from LlamaParse using original logic"""
         rows = []
         items = []
         
+        # Handle different data structures from the original scripts
         if "items" in extracted_data:
             items = extracted_data["items"]
+            for item in items:
+                item["po_number"] = self._get_value(extracted_data, ["po_number", "purchase_order_number", "PO No"])
+                item["vendor_invoice_number"] = self._get_value(extracted_data, ["vendor_invoice_number", "invoice_number", "inv_no", "Invoice No"])
+                item["supplier"] = self._get_value(extracted_data, ["supplier", "vendor", "Supplier Name"])
+                item["shipping_address"] = self._get_value(extracted_data, ["shipping_address", "receiver_address", "Shipping Address"])
+                item["grn_date"] = self._get_value(extracted_data, ["grn_date", "delivered_on", "GRN Date"])
+                item["source_file"] = file_info['name']
+                item["processed_date"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                item["drive_file_id"] = file_info['id']
         elif "product_items" in extracted_data:
             items = extracted_data["product_items"]
+            for item in items:
+                item["po_number"] = self._get_value(extracted_data, ["purchase_order_number", "po_number", "PO No"])
+                item["vendor_invoice_number"] = self._get_value(extracted_data, ["supplier_bill_number", "vendor_invoice_number", "invoice_number"])
+                item["supplier"] = self._get_value(extracted_data, ["supplier", "vendor", "Supplier Name"])
+                item["shipping_address"] = self._get_value(extracted_data, ["Shipping Address", "receiver_address", "shipping_address"])
+                item["grn_date"] = self._get_value(extracted_data, ["delivered_on", "grn_date"])
+                item["source_file"] = file_info['name']
+                item["processed_date"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                item["drive_file_id"] = file_info['id']
         else:
-            st.warning(f"Skipping (no recognizable items key): {file_info['name']}")
             return rows
         
-        # Define top-level fields
-        row_base = {
-            "vendor_name": self._get_value(extracted_data, ["vendor_name", "supplier", "vendor", "Supplier Name"]),
-            "po_number": self._get_value(extracted_data, ["po_number", "purchase_order_number", "PO No"]),
-            "po_date": self._get_value(extracted_data, ["po_date", "purchase_order_date"]),
-            "grn_no": self._get_value(extracted_data, ["grn_no", "grn_number"]),
-            "grn_date": self._get_value(extracted_data, ["grn_date", "delivered_on", "GRN Date"]),
-            "invoice_no": self._get_value(extracted_data, ["invoice_no", "vendor_invoice_number", "invoice_number", "inv_no", "Invoice No"]),
-            "invoice_date": self._get_value(extracted_data, ["invoice_date", "invoice_dt"]),
-            "source_file": file_info['name'],
-            "processed_date": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "drive_file_id": file_info['id']
-        }
-        
+        # Clean items and add to rows
         for item in items:
-            row = row_base.copy()
-            row.update({
-                "sku_code": self._get_value(item, ["sku_code", "sku"]),
-                "sku_description": self._get_value(item, ["sku_description", "description", "product_name"]),
-                "vendor_sku": self._get_value(item, ["vendor_sku", "vendor_sku_code"]),
-                "sku_bin": self._get_value(item, ["sku_bin", "bin_code"]),
-                "lot_no": self._get_value(item, ["lot_no", "lot_number"]),
-                "lot_mrp": self._get_value(item, ["lot_mrp", "mrp"]),
-                "exp_qty": self._get_value(item, ["exp_qty", "expected_quantity"]),
-                "recv_qty": self._get_value(item, ["recv_qty", "received_quantity"]),
-                "unit_price": self._get_value(item, ["unit_price", "price_per_unit"]),
-                "taxable_value": self._get_value(item, ["taxable_value", "taxable_amt"]),
-                "add_cess": self._get_value(item, ["add_cess", "additional_cess"]),
-                "total_inr": self._get_value(item, ["total_inr", "total_amount"])
-            })
-            cleaned_row = {k: v for k, v in row.items() if v not in ["", None]}
-            rows.append(cleaned_row)
+            cleaned_item = {k: v for k, v in item.items() if v not in ["", None]}
+            rows.append(cleaned_item)
         
         return rows
     
@@ -600,11 +563,14 @@ class InstamartAutomation:
                 return data[key]
         return default
     
-    def _save_to_sheets(self, spreadsheet_id: str, sheet_name: str, rows: List[Dict], file_id: str, sheet_id: int):
+    def _save_to_sheets(self, spreadsheet_id: str, sheet_name: str, rows: List[Dict]):
         """Save data to Google Sheets with proper header management and row replacement"""
         try:
             if not rows:
                 return
+            
+            # Get sheet ID for operations
+            sheet_id = self._get_sheet_id(spreadsheet_id, sheet_name)
             
             # Get existing headers and data
             existing_headers = self._get_sheet_headers(spreadsheet_id, sheet_name)
@@ -627,14 +593,19 @@ class InstamartAutomation:
                 all_headers = new_headers
                 self._update_headers(spreadsheet_id, sheet_name, all_headers)
             
-            # Prepare values
-            values = [[row.get(h, "") for h in all_headers] for row in rows]
+            # Get file ID to replace existing rows for this file
+            file_id = rows[0].get('drive_file_id', '') if rows else ''
             
-            # Replace rows for this specific file
-            self._replace_rows_for_file(spreadsheet_id, sheet_name, file_id, all_headers, values, sheet_id)
+            if file_id:
+                # Replace rows for this specific file
+                self._replace_rows_for_file(spreadsheet_id, sheet_name, file_id, all_headers, rows, sheet_id)
+            else:
+                # Just append if no file ID
+                values = [[row.get(h, "") for h in all_headers] for row in rows]
+                self._append_to_google_sheet(spreadsheet_id, sheet_name, values)
             
         except Exception as e:
-            st.error(f"Failed to save to sheets: {str(e)}")
+            pass
     
     def _get_sheet_headers(self, spreadsheet_id: str, sheet_name: str) -> List[str]:
         """Get existing headers from Google Sheet"""
@@ -647,7 +618,6 @@ class InstamartAutomation:
             values = result.get('values', [])
             return values[0] if values else []
         except Exception as e:
-            st.info(f"No existing headers found: {str(e)}")
             return []
     
     def _update_headers(self, spreadsheet_id: str, sheet_name: str, headers: List[str]) -> bool:
@@ -660,10 +630,8 @@ class InstamartAutomation:
                 valueInputOption='USER_ENTERED',
                 body=body
             ).execute()
-            st.info(f"Updated headers with {len(headers)} columns")
             return True
         except Exception as e:
-            st.error(f"Failed to update headers: {str(e)}")
             return False
     
     def _get_sheet_id(self, spreadsheet_id: str, sheet_name: str) -> int:
@@ -673,10 +641,8 @@ class InstamartAutomation:
             for sheet in metadata.get('sheets', []):
                 if sheet['properties']['title'] == sheet_name:
                     return sheet['properties']['sheetId']
-            st.warning(f"Sheet '{sheet_name}' not found")
             return 0
         except Exception as e:
-            st.error(f"Failed to get sheet metadata: {str(e)}")
             return 0
     
     def _get_sheet_data(self, spreadsheet_id: str, sheet_name: str) -> List[List[str]]:
@@ -689,17 +655,17 @@ class InstamartAutomation:
             ).execute()
             return result.get('values', [])
         except Exception as e:
-            st.error(f"Failed to get sheet data: {str(e)}")
             return []
     
     def _replace_rows_for_file(self, spreadsheet_id: str, sheet_name: str, file_id: str, 
-                             headers: List[str], new_rows: List[List[Any]], sheet_id: int) -> bool:
+                             headers: List[str], new_rows: List[Dict], sheet_id: int) -> bool:
         """Delete existing rows for the file if any, and append new rows"""
         try:
             values = self._get_sheet_data(spreadsheet_id, sheet_name)
             if not values:
                 # No existing data, just append
-                return self._append_to_google_sheet(spreadsheet_id, sheet_name, new_rows)
+                values_to_append = [[row.get(h, "") for h in headers] for row in new_rows]
+                return self._append_to_google_sheet(spreadsheet_id, sheet_name, values_to_append)
             
             current_headers = values[0]
             data_rows = values[1:]
@@ -708,8 +674,8 @@ class InstamartAutomation:
             try:
                 file_id_col = current_headers.index('drive_file_id')
             except ValueError:
-                st.info("No 'drive_file_id' column found, appending new rows")
-                return self._append_to_google_sheet(spreadsheet_id, sheet_name, new_rows)
+                values_to_append = [[row.get(h, "") for h in headers] for row in new_rows]
+                return self._append_to_google_sheet(spreadsheet_id, sheet_name, values_to_append)
             
             # Find rows to delete (matching file_id)
             rows_to_delete = []
@@ -739,13 +705,12 @@ class InstamartAutomation:
                         spreadsheetId=spreadsheet_id,
                         body=body
                     ).execute()
-                    st.info(f"Deleted {len(rows_to_delete)} existing rows for file {file_id}")
             
             # Append new rows
-            return self._append_to_google_sheet(spreadsheet_id, sheet_name, new_rows)
+            values_to_append = [[row.get(h, "") for h in headers] for row in new_rows]
+            return self._append_to_google_sheet(spreadsheet_id, sheet_name, values_to_append)
             
         except Exception as e:
-            st.error(f"Failed to replace rows: {str(e)}")
             return False
     
     def _append_to_google_sheet(self, spreadsheet_id: str, range_name: str, values: List[List[Any]]) -> bool:
@@ -763,17 +728,28 @@ class InstamartAutomation:
                     body=body
                 ).execute()
                 
-                updated_cells = result.get('updates', {}).get('updatedCells', 0)
-                st.info(f"Appended {updated_cells} cells to Google Sheet")
                 return True
             except Exception as e:
                 if attempt < max_retries:
-                    st.warning(f"Failed to append to Google Sheet (attempt {attempt}/{max_retries}): {str(e)}")
                     time.sleep(wait_time)
                 else:
-                    st.error(f"Failed to append to Google Sheet after {max_retries} attempts: {str(e)}")
                     return False
         return False
+
+def run_workflow_in_background(automation, workflow_type, gmail_config, pdf_config, progress_queue):
+    """Run the selected workflow in background, sending updates to queue"""
+    if workflow_type == "gmail":
+        automation.process_gmail_workflow(gmail_config, progress_queue)
+    elif workflow_type == "pdf":
+        automation.process_pdf_workflow(pdf_config, progress_queue)
+    elif workflow_type == "combined":
+        progress_queue.put({'type': 'info', 'text': "Running combined workflow..."})
+        progress_queue.put({'type': 'status', 'text': "Step 1: Gmail Attachment Download"})
+        automation.process_gmail_workflow(gmail_config, progress_queue)
+        time.sleep(2)  # Small delay between steps
+        progress_queue.put({'type': 'status', 'text': "Step 2: PDF Processing"})
+        automation.process_pdf_workflow(pdf_config, progress_queue)
+        progress_queue.put({'type': 'success', 'text': "Combined workflow completed successfully!"})
 
 def main():
     st.title("⚡ Instamart Automation Dashboard")
@@ -793,11 +769,24 @@ def main():
     if 'pdf_config' not in st.session_state:
         st.session_state.pdf_config = {
             'drive_folder_id': '19basSTaOUB-X0FlrwmBkeVULgE8nBQ5x',
-            'llama_api_key': 'llx-8ohZG6LKpXdcd3o3QjvpgqyKMGLOStOAG71Mw0QSAgDsSALU',
+            'llama_api_key': 'llx-EBIuWAuvn8vnNzhCfaAGePeae1PnOwD4ftUPPACUx461YMid',
             'llama_agent': 'Instamart Agent',
             'spreadsheet_id': '16WLcJKfkSLkTj1io962aSkgTGbk09PMdJTgkWNn11fw',
             'sheet_range': 'instamartgrn',
             'days_back': 1
+        }
+    
+    # Initialize workflow state
+    if 'workflow_state' not in st.session_state:
+        st.session_state.workflow_state = {
+            'running': False,
+            'type': None,
+            'progress': 0,
+            'status': '',
+            'logs': [],
+            'result': None,
+            'thread': None,
+            'queue': queue.Queue()
         }
     
     # Configuration section in sidebar
@@ -858,23 +847,22 @@ def main():
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        if st.button("Gmail Workflow Only", use_container_width=True):
-            st.session_state.workflow = "gmail"
+        if st.button("Gmail Workflow Only", use_container_width=True, 
+                    disabled=st.session_state.workflow_state['running']):
+            st.session_state.workflow_state['type'] = "gmail"
     
     with col2:
-        if st.button("PDF Workflow Only", use_container_width=True):
-            st.session_state.workflow = "pdf"
+        if st.button("PDF Workflow Only", use_container_width=True, 
+                    disabled=st.session_state.workflow_state['running']):
+            st.session_state.workflow_state['type'] = "pdf"
     
     with col3:
-        if st.button("Combined Workflow", use_container_width=True):
-            st.session_state.workflow = "combined"
-    
-    # Initialize session state for workflow
-    if 'workflow' not in st.session_state:
-        st.session_state.workflow = None
+        if st.button("Combined Workflow", use_container_width=True, 
+                    disabled=st.session_state.workflow_state['running']):
+            st.session_state.workflow_state['type'] = "combined"
     
     # Show current configuration preview
-    if not st.session_state.workflow:
+    if not st.session_state.workflow_state['type'] and not st.session_state.workflow_state['running']:
         st.header("Current Configuration")
         
         col1, col2 = st.columns(2)
@@ -891,10 +879,9 @@ def main():
             st.json(display_pdf_config)
         
         st.info("Configure your settings in the sidebar, then select a workflow above to begin automation")
-        return
     
     # Run workflows using session state configurations
-    if st.session_state.workflow:
+    if st.session_state.workflow_state['type'] and not st.session_state.workflow_state['running']:
         # Create automation instance
         automation = InstamartAutomation()
         
@@ -909,94 +896,76 @@ def main():
             # Workflow execution section
             st.header("Workflow Execution")
             
-            # Progress tracking
-            main_progress = st.progress(0)
-            main_status = st.empty()
+            # Start the background thread
+            thread = threading.Thread(
+                target=run_workflow_in_background,
+                args=(automation, st.session_state.workflow_state['type'], 
+                      st.session_state.gmail_config, st.session_state.pdf_config, 
+                      st.session_state.workflow_state['queue'])
+            )
+            thread.start()
             
-            # Log container
-            st.subheader("Real-time Logs")
-            log_container = st.empty()
-            
-            if st.session_state.workflow == "gmail":
-                result = automation.process_gmail_workflow(
-                    st.session_state.gmail_config, main_progress, main_status, log_container
-                )
-                if result['success']:
-                    st.success(f"Gmail workflow completed! Processed {result['processed']} attachments")
-                else:
-                    st.error("Gmail workflow failed")
-            
-            elif st.session_state.workflow == "pdf":
-                result = automation.process_pdf_workflow(
-                    st.session_state.pdf_config, main_progress, main_status, log_container
-                )
-                if result['success']:
-                    st.success(f"PDF workflow completed! Processed {result['processed']} PDFs")
-                else:
-                    st.error("PDF workflow failed")
-            
-            elif st.session_state.workflow == "combined":
-                st.info("Running combined workflow...")
-                
-                # Step 1: Gmail workflow
-                st.subheader("Step 1: Gmail Attachment Download")
-                gmail_result = automation.process_gmail_workflow(
-                    st.session_state.gmail_config, main_progress, main_status, log_container
-                )
-                
-                if gmail_result['success']:
-                    st.success(f"Gmail step completed! Processed {gmail_result['processed']} attachments")
-                    
-                    # Small delay
-                    time.sleep(2)
-                    
-                    # Step 2: PDF processing
-                    st.subheader("Step 2: PDF Processing")
-                    pdf_result = automation.process_pdf_workflow(
-                        st.session_state.pdf_config, main_progress, main_status, log_container
-                    )
-                    
-                    if pdf_result['success']:
-                        st.success(f"Combined workflow completed successfully!")
-                        st.balloons()
-                    else:
-                        st.error("PDF processing step failed")
-                else:
-                    st.error("Gmail step failed - stopping combined workflow")
-        
-        # Reset workflow with confirmation
-        st.markdown("---")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Reset Workflow", use_container_width=True):
-                st.session_state.workflow = None
-                st.rerun()
-        with col2:
-            if st.button("Reset All Settings", use_container_width=True, type="secondary"):
-                # Reset all configurations
-                for key in ['gmail_config', 'pdf_config', 'workflow']:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                st.rerun()
+            # Update workflow state
+            st.session_state.workflow_state['running'] = True
+            st.session_state.workflow_state['thread'] = thread
+            st.session_state.workflow_state['logs'] = []
+            st.session_state.workflow_state['progress'] = 0
+            st.session_state.workflow_state['status'] = "Initializing..."
     
-    else:
-        # Show configuration preview when no workflow is selected
-        st.header("📋 Current Configuration")
+    # Handle running workflows
+    if st.session_state.workflow_state['running']:
+        # Enable auto-refresh every 1 second while running
+        st_autorefresh(interval=1000, key="workflow_refresh")
         
-        col1, col2 = st.columns(2)
+        # Poll the queue for updates
+        while not st.session_state.workflow_state['queue'].empty():
+            msg = st.session_state.workflow_state['queue'].get()
+            if msg['type'] == 'progress':
+                st.session_state.workflow_state['progress'] = msg['value']
+            elif msg['type'] == 'status':
+                st.session_state.workflow_state['status'] = msg['text']
+            elif msg['type'] == 'info':
+                st.session_state.workflow_state['logs'].append(f"INFO: {msg['text']}")
+            elif msg['type'] == 'warning':
+                st.session_state.workflow_state['logs'].append(f"WARNING: {msg['text']}")
+            elif msg['type'] == 'error':
+                st.session_state.workflow_state['logs'].append(f"ERROR: {msg['text']}")
+            elif msg['type'] == 'success':
+                st.session_state.workflow_state['logs'].append(f"SUCCESS: {msg['text']}")
+            elif msg['type'] == 'done':
+                st.session_state.workflow_state['result'] = msg['result']
+                st.session_state.workflow_state['running'] = False
         
-        with col1:
-            st.subheader("Gmail Configuration")
-            st.json(st.session_state.gmail_config)
+        # Progress tracking
+        main_progress = st.progress(st.session_state.workflow_state['progress'])
+        main_status = st.text(st.session_state.workflow_state['status'])
         
-        with col2:
-            st.subheader("PDF Configuration")
-            display_pdf_config = st.session_state.pdf_config.copy()
-            display_pdf_config['llama_api_key'] = "*" * len(display_pdf_config['llama_api_key'])
-            st.json(display_pdf_config)
+        # Log container
+        st.subheader("Real-time Logs")
+        log_container = st.empty()
+        log_container.text_area("Logs", "\n".join(st.session_state.workflow_state['logs'][-50:]), height=200)
         
-        st.info("Select a workflow above to begin automation")
+        # Check if workflow is done
+        if not st.session_state.workflow_state['running']:
+            # Clean up thread
+            thread = st.session_state.workflow_state['thread']
+            if thread and thread.is_alive():
+                thread.join()
+            
+            # Show result
+            result = st.session_state.workflow_state['result']
+            if result and result['success']:
+                st.success(f"{st.session_state.workflow_state['type'].capitalize()} workflow completed! Processed {result['processed']} items")
+                if st.session_state.workflow_state['type'] == "combined":
+                    st.balloons()
+            elif result:
+                st.error(f"{st.session_state.workflow_state['type'].capitalize()} workflow failed")
+            
+            # Reset button
+            if st.button("Reset Workflow"):
+                st.session_state.workflow_state['type'] = None
+                st.session_state.workflow_state['result'] = None
+                st.rerun()
 
 if __name__ == "__main__":
     main()
-
