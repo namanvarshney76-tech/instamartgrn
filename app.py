@@ -54,7 +54,7 @@ CONFIG = {
         'attachment_filter': 'GRN'
     },
     'sheet': {
-        'llama_api_key': 'llx-hcqECRZImENYitspfPbb3U3zZ5qVVZLhfpBRfvq5Pp6DKY60',
+        'llama_api_key': 'llx-csECp5RB25AeiLp57MQ8GnpViLFNyaezTOoHQIiwD7yn0CMr',
         'llama_agent': 'Instamart Agent',
         'drive_folder_id': '19basSTaOUB-X0FlrwmBkeVULgE8nBQ5x',
         'spreadsheet_id': '16WLcJKfkSLkTj1io962aSkgTGbk09PMdJTgkWNn11fw',
@@ -736,7 +736,7 @@ class InstamartAutomation:
             self.log(f"[ERROR] Failed to update headers: {str(e)}")
             return False
     
-    def process_drive_to_sheet_workflow(self, config: dict, progress_callback=None, status_callback=None, skip_existing: bool = False):
+    def process_drive_to_sheet_workflow(self, config: dict, progress_callback=None, status_callback=None, skip_existing: bool = False, max_files: Optional[int] = None):
         """Process Drive to Sheet workflow"""
         stats = {
             'total_pdfs': 0,
@@ -779,6 +779,10 @@ class InstamartAutomation:
             if skip_existing:
                 pdf_files = [f for f in pdf_files if f['id'] not in existing_ids]
                 self.log(f"After filtering, {len(pdf_files)} PDFs to process", "INFO")
+            
+            if max_files is not None:
+                pdf_files = pdf_files[:max_files]
+                self.log(f"Limited to {len(pdf_files)} PDFs after max_files limit", "INFO")
             
             if progress_callback:
                 progress_callback(25)
@@ -1032,6 +1036,15 @@ def main():
                     help="Only process PDFs created in the last N days",
                     key="sheet_days_back"
                 )
+                sheet_max_files = st.number_input(
+                    "Maximum PDFs to process", 
+                    min_value=1, 
+                    max_value=500, 
+                    value=50,
+                    help="Maximum number of PDFs to process",
+                    key="sheet_max_files"
+                )
+                sheet_skip_existing = st.checkbox("Skip already processed files", value=True, key="sheet_skip_existing")
             
             with col2:
                 st.subheader("Description")
@@ -1073,7 +1086,9 @@ def main():
                             result = automation.process_drive_to_sheet_workflow(
                                 config, 
                                 progress_callback=update_progress,
-                                status_callback=update_status
+                                status_callback=update_status,
+                                skip_existing=sheet_skip_existing,
+                                max_files=sheet_max_files
                             )
                             
                             if result['total_pdfs'] > 0:
@@ -1124,6 +1139,14 @@ def main():
                     help="Maximum emails to process in Mail workflow",
                     key="combined_max_emails"
                 )
+                combined_max_files = st.number_input(
+                    "Max PDFs for processing", 
+                    min_value=1, 
+                    max_value=500, 
+                    value=50,
+                    help="Maximum number of PDFs to process",
+                    key="combined_max_files"
+                )
             
             with col2:
                 st.subheader("Description")
@@ -1156,7 +1179,8 @@ def main():
                             'drive_folder_id': CONFIG['sheet']['drive_folder_id'],
                             'spreadsheet_id': CONFIG['sheet']['spreadsheet_id'],
                             'sheet_range': CONFIG['sheet']['sheet_range'],
-                            'days_back': combined_days_back
+                            'days_back': combined_days_back,
+                            'max_files': combined_max_files
                         }
                         
                         progress_container = st.container()
@@ -1258,4 +1282,3 @@ def main():
 # Run the application
 if __name__ == "__main__":
     main()
-
