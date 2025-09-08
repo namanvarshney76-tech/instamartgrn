@@ -872,64 +872,6 @@ class InstamartAutomation:
             self.log(f"[ERROR] LlamaParse processing failed: {str(e)}")
             return stats
 
-def run_workflow_in_thread(workflow_func, config, extra_kwargs=None, queue_key='progress_queue', thread_key='workflow_thread'):
-    progress_queue = queue.Queue()
-    st.session_state[queue_key] = progress_queue
-
-    def update_progress(value):
-        progress_queue.put(('progress', value))
-
-    def update_status(message):
-        progress_queue.put(('status', message))
-
-    def workflow_target():
-        if extra_kwargs:
-            result = workflow_func(config, update_progress, update_status, **extra_kwargs)
-        else:
-            result = workflow_func(config, update_progress, update_status)
-        progress_queue.put(('result', result))
-
-    thread = threading.Thread(target=workflow_target)
-    thread.start()
-    st.session_state[thread_key] = thread
-
-def handle_workflow_progress(queue_key='progress_queue', thread_key='workflow_thread', success_msg_func=None, error_msg="Workflow failed. Check logs for details."):
-    if queue_key in st.session_state and thread_key in st.session_state:
-        thread = st.session_state[thread_key]
-        progress_queue = st.session_state[queue_key]
-
-        progress_container = st.container()
-        with progress_container:
-            st.subheader("📊 Processing Status")
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            updated = False
-            while not progress_queue.empty():
-                msg = progress_queue.get_nowait()
-                if msg[0] == 'progress':
-                    progress_bar.progress(msg[1])
-                    updated = True
-                elif msg[0] == 'status':
-                    status_text.text(msg[1])
-                    updated = True
-                elif msg[0] == 'result':
-                    result = msg[1]
-                    if result.get('success', False):
-                        st.success(success_msg_func(result) if success_msg_func else "Workflow completed successfully!")
-                    else:
-                        st.error(error_msg)
-                    st.session_state.workflow_running = False
-                    del st.session_state[thread_key]
-                    del st.session_state[queue_key]
-                    return
-            if thread.is_alive():
-                if updated:
-                    time.sleep(0.1)
-                else:
-                    time.sleep(1)
-                st.rerun()
-
 def main():
     """Main Streamlit application"""
     st.title("🤖 Instamart Automation Workflows")
@@ -970,7 +912,7 @@ def main():
         auth_status.success("✅ Already authenticated")
         
         # Clear authentication button
-        if st.sidebar.button("🔄 Re-authenticate", disabled=st.session_state.workflow_running):
+        if st.sidebar.button("🔄 Re-authenticate"):
             if 'oauth_token' in st.session_state:
                 del st.session_state.oauth_token
             st.session_state.automation = InstamartAutomation()
@@ -1029,20 +971,41 @@ def main():
                 else:
                     st.session_state.workflow_running = True
                     
-                    config = {
-                        'sender': CONFIG['mail']['sender'],
-                        'search_term': CONFIG['mail']['search_term'],
-                        'days_back': mail_days_back,
-                        'max_results': mail_max_results,
-                        'gdrive_folder_id': CONFIG['mail']['gdrive_folder_id'],
-                        'attachment_filter': CONFIG['mail']['attachment_filter']
-                    }
+                    try:
+                        config = {
+                            'sender': CONFIG['mail']['sender'],
+                            'search_term': CONFIG['mail']['search_term'],
+                            'days_back': mail_days_back,
+                            'max_results': mail_max_results,
+                            'gdrive_folder_id': CONFIG['mail']['gdrive_folder_id'],
+                            'attachment_filter': CONFIG['mail']['attachment_filter']
+                        }
+                        
+                        progress_container = st.container()
+                        with progress_container:
+                            st.subheader("📊 Processing Status")
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            def update_progress(value):
+                                progress_bar.progress(value)
+                            
+                            def update_status(message):
+                                status_text.text(message)
+                            
+                            result = automation.process_mail_to_drive_workflow(
+                                config, 
+                                progress_callback=update_progress,
+                                status_callback=update_status
+                            )
+                            
+                            if result['success']:
+                                st.success(f"✅ Mail to Drive workflow completed successfully! Processed {result['total_attachments']} attachments.")
+                            else:
+                                st.error("❌ Mail to Drive workflow failed. Check logs for details.")
                     
-                    run_workflow_in_thread(automation.process_mail_to_drive_workflow, config, queue_key='mail_progress_queue', thread_key='mail_workflow_thread')
-            
-            handle_workflow_progress(queue_key='mail_progress_queue', thread_key='mail_workflow_thread', 
-                                     success_msg_func=lambda r: f"✅ Mail to Drive workflow completed successfully! Processed {r['total_attachments']} attachments.",
-                                     error_msg="❌ Mail to Drive workflow failed. Check logs for details.")
+                    finally:
+                        st.session_state.workflow_running = False
     
     # Tab 2: Drive to Sheet Workflow
     with tab2:
@@ -1098,21 +1061,43 @@ def main():
                 else:
                     st.session_state.workflow_running = True
                     
-                    config = {
-                        'llama_api_key': CONFIG['sheet']['llama_api_key'],
-                        'llama_agent': CONFIG['sheet']['llama_agent'],
-                        'drive_folder_id': CONFIG['sheet']['drive_folder_id'],
-                        'spreadsheet_id': CONFIG['sheet']['spreadsheet_id'],
-                        'sheet_range': CONFIG['sheet']['sheet_range'],
-                        'days_back': sheet_days_back
-                    }
+                    try:
+                        config = {
+                            'llama_api_key': CONFIG['sheet']['llama_api_key'],
+                            'llama_agent': CONFIG['sheet']['llama_agent'],
+                            'drive_folder_id': CONFIG['sheet']['drive_folder_id'],
+                            'spreadsheet_id': CONFIG['sheet']['spreadsheet_id'],
+                            'sheet_range': CONFIG['sheet']['sheet_range'],
+                            'days_back': sheet_days_back
+                        }
+                        
+                        progress_container = st.container()
+                        with progress_container:
+                            st.subheader("📊 Processing Status")
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            def update_progress(value):
+                                progress_bar.progress(value)
+                            
+                            def update_status(message):
+                                status_text.text(message)
+                            
+                            result = automation.process_drive_to_sheet_workflow(
+                                config, 
+                                progress_callback=update_progress,
+                                status_callback=update_status,
+                                skip_existing=sheet_skip_existing,
+                                max_files=sheet_max_files
+                            )
+                            
+                            if result['total_pdfs'] > 0:
+                                st.success(f"✅ Drive to Sheet workflow completed successfully! Processed {result['processed_pdfs']} PDFs, added {result['rows_added']} rows.")
+                            else:
+                                st.info("No PDFs processed.")
                     
-                    run_workflow_in_thread(automation.process_drive_to_sheet_workflow, config, 
-                                           extra_kwargs={'skip_existing': sheet_skip_existing, 'max_files': sheet_max_files},
-                                           queue_key='sheet_progress_queue', thread_key='sheet_workflow_thread')
-            
-            handle_workflow_progress(queue_key='sheet_progress_queue', thread_key='sheet_workflow_thread', 
-                                     success_msg_func=lambda r: f"✅ Drive to Sheet workflow completed successfully! Processed {r['processed_pdfs']} PDFs, added {r['rows_added']} rows." if r['total_pdfs'] > 0 else "No PDFs processed.")
+                    finally:
+                        st.session_state.workflow_running = False
     
     # Tab 3: Combined Workflow
     with tab3:
@@ -1178,52 +1163,63 @@ def main():
                 else:
                     st.session_state.workflow_running = True
                     
-                    mail_config = {
-                        'sender': CONFIG['mail']['sender'],
-                        'search_term': CONFIG['mail']['search_term'],
-                        'days_back': combined_days_back,
-                        'max_results': combined_max_emails,
-                        'gdrive_folder_id': CONFIG['mail']['gdrive_folder_id'],
-                        'attachment_filter': CONFIG['mail']['attachment_filter']
-                    }
-                    
-                    sheet_config = {
-                        'llama_api_key': CONFIG['sheet']['llama_api_key'],
-                        'llama_agent': CONFIG['sheet']['llama_agent'],
-                        'drive_folder_id': CONFIG['sheet']['drive_folder_id'],
-                        'spreadsheet_id': CONFIG['sheet']['spreadsheet_id'],
-                        'sheet_range': CONFIG['sheet']['sheet_range'],
-                        'days_back': combined_days_back
-                    }
-                    
-                    progress_queue = queue.Queue()
-                    st.session_state['combined_progress_queue'] = progress_queue
-
-                    def update_progress(value):
-                        progress_queue.put(('progress', value))
-
-                    def update_status(message):
-                        progress_queue.put(('status', message))
-
-                    def combined_target():
-                        update_status("Running Mail to Drive...")
-                        mail_result = automation.process_mail_to_drive_workflow(mail_config, update_progress, update_status)
-                        if not mail_result['success']:
-                            progress_queue.put(('result', {'success': False, 'message': "Mail to Drive workflow failed. Stopping combined workflow."}))
-                            return
+                    try:
+                        mail_config = {
+                            'sender': CONFIG['mail']['sender'],
+                            'search_term': CONFIG['mail']['search_term'],
+                            'days_back': combined_days_back,
+                            'max_results': combined_max_emails,
+                            'gdrive_folder_id': CONFIG['mail']['gdrive_folder_id'],
+                            'attachment_filter': CONFIG['mail']['attachment_filter']
+                        }
                         
-                        update_status("Checking existing files and running Drive to Sheet...")
-                        sheet_result = automation.process_drive_to_sheet_workflow(sheet_config, update_progress, update_status, skip_existing=True, max_files=combined_max_files)
+                        sheet_config = {
+                            'llama_api_key': CONFIG['sheet']['llama_api_key'],
+                            'llama_agent': CONFIG['sheet']['llama_agent'],
+                            'drive_folder_id': CONFIG['sheet']['drive_folder_id'],
+                            'spreadsheet_id': CONFIG['sheet']['spreadsheet_id'],
+                            'sheet_range': CONFIG['sheet']['sheet_range'],
+                            'days_back': combined_days_back,
+                            'max_files': combined_max_files
+                        }
                         
-                        progress_queue.put(('result', {'success': True, 'mail_result': mail_result, 'sheet_result': sheet_result}))
-
-                    thread = threading.Thread(target=combined_target)
-                    thread.start()
-                    st.session_state['combined_workflow_thread'] = thread
-            
-            handle_workflow_progress(queue_key='combined_progress_queue', thread_key='combined_workflow_thread', 
-                                     success_msg_func=lambda r: f"✅ Combined workflow completed! Mail: Processed {r['mail_result']['total_attachments']} attachments. Sheet: Processed {r['sheet_result']['processed_pdfs']} new PDFs, added {r['sheet_result']['rows_added']} rows.",
-                                     error_msg=lambda r: r.get('message', "❌ Combined workflow failed. Check logs for details."))
+                        progress_container = st.container()
+                        with progress_container:
+                            st.subheader("📊 Processing Status")
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            def update_progress(value):
+                                progress_bar.progress(value)
+                            
+                            def update_status(message):
+                                status_text.text(message)
+                            
+                            # Run Mail to Drive workflow
+                            update_status("Running Mail to Drive...")
+                            mail_result = automation.process_mail_to_drive_workflow(
+                                mail_config, 
+                                progress_callback=update_progress,
+                                status_callback=update_status
+                            )
+                            
+                            if not mail_result['success']:
+                                st.error("❌ Mail to Drive workflow failed. Stopping combined workflow.")
+                                return
+                            
+                            # Run Drive to Sheet workflow with skip_existing
+                            update_status("Checking existing files and running Drive to Sheet...")
+                            sheet_result = automation.process_drive_to_sheet_workflow(
+                                sheet_config, 
+                                progress_callback=update_progress,
+                                status_callback=update_status,
+                                skip_existing=True
+                            )
+                            
+                            st.success(f"✅ Combined workflow completed! Mail: Processed {mail_result['total_attachments']} attachments. Sheet: Processed {sheet_result['processed_pdfs']} new PDFs, added {sheet_result['rows_added']} rows.")
+                    
+                    finally:
+                        st.session_state.workflow_running = False
     
     # Tab 4: Logs and Status
     with tab4:
@@ -1231,20 +1227,17 @@ def main():
         
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("🔄 Refresh Logs", key="refresh_logs", disabled=st.session_state.workflow_running):
+            if st.button("🔄 Refresh Logs", key="refresh_logs"):
                 st.rerun()
         with col2:
-            if st.button("🗑️ Clear Logs", key="clear_logs", disabled=st.session_state.workflow_running):
+            if st.button("🗑️ Clear Logs", key="clear_logs"):
                 automation.clear_logs()
                 st.success("Logs cleared!")
                 st.rerun()
         with col3:
-            if not st.session_state.workflow_running:
-                if st.checkbox("Auto-refresh (5s)", value=False, key="auto_refresh_logs"):
-                    time.sleep(5)
-                    st.rerun()
-            else:
-                st.write("Auto-refresh disabled during workflow")
+            if st.checkbox("Auto-refresh (5s)", value=False, key="auto_refresh_logs"):
+                time.sleep(5)
+                st.rerun()
         
         # Display logs
         logs = automation.get_logs()
@@ -1289,3 +1282,4 @@ def main():
 # Run the application
 if __name__ == "__main__":
     main()
+
