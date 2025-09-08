@@ -385,7 +385,7 @@ class InstamartAutomation:
             
             # Clean filename
             clean_filename = self.sanitize_filename(filename)
-            final_filename = f"{message_id}_{clean_filename}"
+            final_filename = clean_filename
 
             # Get attachment data
             attachment_id = part["body"].get("attachmentId")
@@ -1282,3 +1282,4 @@ def main():
 # Run the application
 if __name__ == "__main__":
     main()
+
